@@ -418,6 +418,7 @@ as_run(int argc, char **argv)
 	as_nsup_start();			// may send evict-void-time(s) to other nodes
 	as_service_start();			// server will now receive client transactions
 	as_info_port_start();		// server will now receive info transactions
+	as_defrag_tuner_start();	// start the defrag tuner
 	as_ticker_start();			// only after everything else is started
 
 	// Relevant for enterprise edition only.

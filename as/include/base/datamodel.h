@@ -56,7 +56,7 @@
 #include "fabric/partition.h"
 #include "storage/flat.h"
 #include "storage/storage.h"
-
+#include "base/datamodel.h"
 
 #define OBJ_SIZE_HIST_NUM_BUCKETS 1024
 #define TTL_HIST_NUM_BUCKETS 100

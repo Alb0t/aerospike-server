@@ -128,7 +128,7 @@ as_namespace_create(char *name)
 
 	ns->storage_type = AS_STORAGE_ENGINE_UNDEFINED;
 
-	ns->storage_defrag_lwm_pct = 50; // defrag if occupancy of block is < 50%
+	ns->storage_defrag_lwm_pct = 10; // defrag if occupancy of block is < 50%
 	ns->storage_defrag_sleep = 1000; // sleep this many microseconds between each wblock
 	ns->storage_encryption = AS_ENCRYPTION_AES_128;
 	ns->storage_flush_max_us = 1000 * 1000; // wait this many microseconds before flushing inactive current write buffer (0 = never)

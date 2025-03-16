@@ -40,6 +40,10 @@
 
 #include "base/cfg.h"
 #include "base/thr_info.h"
+#include "storage/storage.h"
+#include "base/datamodel.h"
+#include "base/cfg_info.h"
+extern as_config g_config;
 
 #define POLL_SZ 1024
 
@@ -200,6 +204,151 @@ thr_info_port_writable(info_port_state *ips)
 
 // Demarshal info socket connections.
 void *
+run_defrag_tuner(void *arg)
+{
+  	// TODO: Add flag to allow user to stop this loop
+  	// run indefinitely
+	while (42 == 42) {
+		cf_info(AS_INFO, "in loop");
+        sleep(1);
+        // loop through each namespace
+        cf_dyn_buf db;
+        cf_dyn_buf_init_heap(&db, 128);
+        char *cmd = (char*)malloc(128 * sizeof(char));
+
+        // goal: change exactly 1 config parameter per namespace to get defrag in better shape.
+        // asinfo command is executed at the bottom
+		for (uint32_t ns_ix = 0; ns_ix < g_config.n_namespaces; ns_ix++) {
+			uint32_t avail_pct;
+            struct as_namespace_s *ns = g_config.namespaces[ns_ix];
+            // fetch current avail_pct from as_storage_stats
+            as_storage_stats(ns, &avail_pct, NULL);
+            uint32_t current_lwm = ns->storage_defrag_lwm_pct;
+            uint32_t current_defrag_sleep = ns->storage_defrag_sleep;
+
+            // log example: "ns_ix 0 avail pct is 3 for test with lwm-pct 16"
+			cf_info(AS_INFO,
+                    "ns_ix: %d, avail_pct: %d,ns->name: %s, lwm-pct: %d, current_defrag_sleep: %d",
+                    ns_ix,
+                    avail_pct,
+                    ns->name,
+                    current_lwm,
+                    current_defrag_sleep
+                    );
+            // TODO: specify limits. Should allow the operator to specify upper/lower LWM bound, and to disable autotuning
+//            if (current_lwm >= 50){
+//              cf_info(AS_INFO, "Current lwm above 50: %u, not tuning", current_lwm);
+//            	break;
+//            }
+
+
+            // add a ticker to output the defrag/write-q as observed from this function
+            uint32_t defrag_q_sz_total = 0;
+            uint32_t write_q_sz_total = 0;
+
+            for (uint32_t storage_ix = 0; storage_ix < g_config.namespaces[ns_ix]->n_storage_files; storage_ix++) {
+              	storage_device_stats stats;
+				as_storage_device_stats(ns, storage_ix, &stats);
+                cf_info(AS_INFO, "defrag_q_sz=%u", stats.defrag_q_sz);
+                defrag_q_sz_total += stats.defrag_q_sz;
+                write_q_sz_total += stats.write_q_sz;
+            }
+            cf_info(AS_INFO,"total defrag-q-sz: %u, write-q total sz: %u", defrag_q_sz_total, write_q_sz_total);
+			//	uint32_t write_q_sz;
+
+            // TODO: can this be percent based? I dont like hard coded numbers here.
+			bool io_limited = write_q_sz_total > 100;
+            bool defrag_piled_up = defrag_q_sz_total > 100;
+            // TODO: move these static values
+            bool below_avail_threshold = avail_pct < 20;
+            bool above_avail_threshold = avail_pct > 30;
+
+            bool above_defrag_sleep_threshold = current_defrag_sleep > 100000;
+            bool below_defrag_sleep_target = current_defrag_sleep < 100;
+
+            bool above_defrag_lwm_limit = current_lwm > 50;
+            bool below_defrag_lwm_limit = current_lwm < 5;
+
+
+            // debug stats
+     		cf_info(AS_INFO, "io_limited: %u, defrag_piled_up: %u, below_avail_threshold: %u, above_avail_threshold: %u", io_limited, defrag_piled_up, below_avail_threshold, above_avail_threshold );
+
+
+			// should be a happy medium here between above/below.
+//            if (
+//                    !below_avail_threshold &&
+//                    !above_avail_threshold &&
+//
+//                    ){
+//            	cf_info(AS_INFO, "We are happy with the current LWM tuning.");
+//				break;
+//            }
+
+            // We need more avail, so we want to increase LWM.. but need to worry about causing an IO issue.
+            // if defrag_q is already full, increasing LWM will just make it worse.
+            if (below_avail_threshold) {
+              	// dont do anything if our drives are choked.
+    			if (io_limited){
+        			cf_info(AS_INFO, "Want to increase LWM, but IO is limited (write-q full)... aborting");
+       				break;
+ 				}
+                // if defrag_q is piled up, try to decrease defrag-sleep
+                if (defrag_piled_up){
+                  	if (below_defrag_sleep_target){
+                    	cf_info(AS_INFO, "defrag_q is piled up, but we're already running a really low defrag-sleep: %u.. aborting", current_defrag_sleep);
+                    	break;
+                  	}
+                  	uint32_t new_val = (current_defrag_sleep * 80) / 100;
+                	cf_info(AS_INFO, "defrag_q is piled up. Decreasing defrag-sleep by 20pct from %u to %u", current_defrag_sleep, new_val);
+		 			snprintf(cmd, 128, "context=namespace;id=%s;defrag-sleep=%u", ns->name, new_val);
+                                                    as_cfg_info_cmd_config_set(NULL, cmd, &db); //forgive me
+
+                    break;
+                }
+                // if defrag_q isn't piled up, lets see if we can increase the lwm
+                if (!defrag_piled_up){
+                	if (above_defrag_lwm_limit){
+                  		cf_info(AS_INFO, "want to increase lwm, but we're at the limits of the autotuner safety limit.. aborting");
+                        break;
+					}
+					uint32_t new_val = current_lwm + 1;
+            		cf_info(AS_INFO, "Increasing LWM from %u to %u", current_lwm, new_val );
+		 			snprintf(cmd, 128, "context=namespace;id=%s;defrag-lwm-pct=%u", ns->name, new_val);
+                                                    as_cfg_info_cmd_config_set(NULL, cmd, &db); //forgive me
+
+                    break;
+    			}
+            }
+            // instead of reinventing the wheel, just call asinfo commands. How gross is that?
+         	// TODO: should this avoid defrag sweep? May be worth conditionally triggering defrag-sweep. The operation seems cheap enough, but I'm jaded
+
+            // we have lots of wiggle room, lets relax defrag
+            if (above_avail_threshold){
+              	// decrease LWM until we hit target.
+              	if (!below_defrag_lwm_limit){
+                	uint32_t new_val = current_lwm - 1;
+            		cf_info(AS_INFO, "Decreasing LWM from %u to %u", current_lwm, new_val );
+		 			snprintf(cmd, 128, "context=namespace;id=%s;defrag-lwm-pct=%u", ns->name, new_val);
+                    as_cfg_info_cmd_config_set(NULL, cmd, &db); //forgive me
+                    // break; // actually lets mess with defrag-sleep too in same loop
+              	}
+                // if LWM is already dialed in, we need to try tuning defrag-sleep next.
+				if (!above_defrag_sleep_threshold){
+                    uint32_t new_val = (current_defrag_sleep * 120) / 100;
+		 			snprintf(cmd, 128, "context=namespace;id=%s;defrag-sleep=%u", ns->name, new_val);
+					cf_info(AS_INFO, "increasing defrag-sleep by 20-pct from %u to %u", current_defrag_sleep, new_val);
+                    as_cfg_info_cmd_config_set(NULL, cmd, &db); //forgive me
+
+				}
+                break;
+            }
+        }
+        free(cmd); // i think i need to do this.. im no programmer though.
+	}
+}
+
+// Demarshal info socket connections.
+void *
 run_info_port(void *arg)
 {
 	cf_poll poll;
@@ -302,4 +451,12 @@ as_info_port_start()
 	while (! g_started) {
 		usleep(1000);
 	}
+}
+
+
+void
+as_defrag_tuner_start()
+{
+	cf_info(AS_INFO, "starting defrag tuner");
+	cf_thread_create_detached(run_defrag_tuner, NULL);
 }

@@ -2302,10 +2302,10 @@ ssd_defrag_sweep(drv_ssd *ssd)
 		ssd_wblock_state *p_wblock_state = &ssd->wblock_state[wblock_id];
 
 		cf_mutex_lock(&p_wblock_state->LOCK);
-
+		// TODO: inuse_sz is in-memory, right? This is cheap I think?
 		if (p_wblock_state->state == WBLOCK_STATE_USED &&
-				p_wblock_state->inuse_sz < ssd->ns->defrag_lwm_size &&
-				! p_wblock_state->short_lived) {
+				p_wblock_state->inuse_sz < ssd->ns->defrag_lwm_size) {
+
 			push_wblock_to_defrag_q(ssd, wblock_id);
 			n_queued++;
 		}
@@ -2409,6 +2409,7 @@ run_ssd_maintenance(void *udata)
 		if (ssd->defrag_sweep != 0) {
 			// May take long enough to mess up other jobs' schedules, but it's a
 			// very rare manually-triggered intervention.
+                        // lol
 			ssd_defrag_sweep(ssd);
 			as_decr_uint32(&ssd->defrag_sweep);
 		}

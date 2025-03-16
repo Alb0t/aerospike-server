@@ -25,6 +25,7 @@
 #include "socket.h"
 
 void as_info_port_start();
+void as_defrag_tuner_start();
 
 extern cf_serv_cfg g_info_bind;
 extern cf_ip_port g_info_port;

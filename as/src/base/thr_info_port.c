@@ -206,22 +206,23 @@ thr_info_port_writable(info_port_state *ips)
 void *
 run_defrag_tuner(void *arg)
 {
+	cf_info(AS_INFO, "defrag tuner started");
   	// TODO: Add flag to allow user to stop this loop
   	// run indefinitely
 	while (42 == 42) {
-		cf_info(AS_INFO, "in loop");
+
         sleep(1);
         // loop through each namespace
         cf_dyn_buf db;
         cf_dyn_buf_init_heap(&db, 128);
-        char *cmd = (char*)malloc(128 * sizeof(char));
+		char *cmd = (char*)malloc(128 * sizeof(char));
 
-        // goal: change exactly 1 config parameter per namespace to get defrag in better shape.
-        // asinfo command is executed at the bottom
+		// goal: change exactly 1 config parameter per namespace to get defrag in better shape.
+		// asinfo command is executed at the bottom
 		for (uint32_t ns_ix = 0; ns_ix < g_config.n_namespaces; ns_ix++) {
 			uint32_t avail_pct;
-            struct as_namespace_s *ns = g_config.namespaces[ns_ix];
-            // fetch current avail_pct from as_storage_stats
+			struct as_namespace_s *ns = g_config.namespaces[ns_ix];
+			// fetch current avail_pct from as_storage_stats
             as_storage_stats(ns, &avail_pct, NULL);
             uint32_t current_lwm = ns->storage_defrag_lwm_pct;
             uint32_t current_defrag_sleep = ns->storage_defrag_sleep;
@@ -235,12 +236,6 @@ run_defrag_tuner(void *arg)
                     current_lwm,
                     current_defrag_sleep
                     );
-            // TODO: specify limits. Should allow the operator to specify upper/lower LWM bound, and to disable autotuning
-//            if (current_lwm >= 50){
-//              cf_info(AS_INFO, "Current lwm above 50: %u, not tuning", current_lwm);
-//            	break;
-//            }
-
 
             // add a ticker to output the defrag/write-q as observed from this function
             uint32_t defrag_q_sz_total = 0;

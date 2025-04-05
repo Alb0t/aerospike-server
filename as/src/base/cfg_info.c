@@ -185,7 +185,7 @@ as_cfg_info_cmd_config_set(const char* name, const char* params, cf_dyn_buf* db)
 {
 	cf_mutex_lock(&g_set_cfg_lock);
 
-	cfg_set(name, params, db);
+	cfg_set(NULL, params, db);
 
 	cf_mutex_unlock(&g_set_cfg_lock);
 }

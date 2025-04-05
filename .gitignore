@@ -19,3 +19,5 @@ cert.pem
 chain.pem
 cacert.pem
 cbl.txt
+.idea
+.vscode

@@ -117,6 +117,11 @@ __wrap_as_read_start(as_transaction* tr)
 	if (test_key(tr)) {
 		hold("hold-read", "entered-read");
 	}
+	else if (tr->origin == FROM_CLIENT && strcmp(tr->rsv.ns->name, "test") == 0 &&
+			memcmp(tr->keyd.digest, hot_digest, sizeof(hot_digest) - 1) == 0 &&
+			tr->keyd.digest[sizeof(hot_digest) - 1] == 255) {
+		hold("hold-colliding-read", "entered-colliding-read");
+	}
 
 	return __real_as_read_start(tr);
 }

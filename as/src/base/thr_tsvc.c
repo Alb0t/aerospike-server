@@ -26,9 +26,11 @@
 
 #include "base/thr_tsvc.h"
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "aerospike/as_atomic.h"
 #include "citrusleaf/alloc.h"
@@ -102,25 +104,107 @@ typedef struct admission_shard_s {
 
 static admission_shard g_admission_shards[ADMISSION_SHARDS];
 
+// Cache one recently saturated key per shard. The list stays authoritative.
+// Separate cache lines keep read-only hits away from the shard mutex.
+typedef struct admission_cache_s {
+	_Alignas(64) _Atomic uint64_t version;
+	_Atomic uintptr_t ns;
+	_Atomic uint64_t digest[3];
+	_Atomic bool is_write;
+	_Atomic uint32_t count;
+} admission_cache;
+
+static admission_cache g_admission_cache[ADMISSION_SHARDS];
+
+_Static_assert(sizeof(admission_cache) == 64, "admission cache entry size");
+_Static_assert(sizeof(cf_digest) <= sizeof(((admission_cache*)0)->digest),
+		"admission cache must store the full digest");
+
+static bool
+cache_matches(const admission_cache* cache, const admission_slot* slot)
+{
+	uint64_t digest[3] = { 0 };
+	memcpy(digest, &slot->keyd, sizeof(slot->keyd));
+
+	return atomic_load(&cache->ns) == (uintptr_t)slot->ns &&
+			atomic_load(&cache->is_write) == slot->is_write &&
+			atomic_load(&cache->digest[0]) == digest[0] &&
+			atomic_load(&cache->digest[1]) == digest[1] &&
+			atomic_load(&cache->digest[2]) == digest[2];
+}
+
+static bool
+cache_is_full(const admission_cache* cache, const admission_slot* slot,
+		uint32_t limit)
+{
+	uint64_t version = atomic_load(&cache->version);
+
+	// All snapshot fields use sequentially consistent atomics. An unchanged
+	// even version covers the identity and count in the same publication.
+	// A racing release may free a slot after this count has been read.
+	return !(version & 1) && atomic_load(&cache->count) >= limit &&
+			cache_matches(cache, slot) && atomic_load(&cache->version) == version;
+}
+
+// The caller holds the shard mutex and has counted every matching slot.
+static void
+cache_publish(admission_cache* cache, const admission_slot* slot, uint32_t count)
+{
+	uint64_t digest[3] = { 0 };
+	memcpy(digest, &slot->keyd, sizeof(slot->keyd));
+	uint64_t version = atomic_load(&cache->version);
+	atomic_store(&cache->version, version + 1);
+	atomic_store(&cache->ns, (uintptr_t)slot->ns);
+	atomic_store(&cache->is_write, slot->is_write);
+
+	for (unsigned i = 0; i < 3; i++) {
+		atomic_store(&cache->digest[i], digest[i]);
+	}
+
+	atomic_store(&cache->count, count);
+	atomic_store(&cache->version, version + 2);
+}
+
 static bool
 try_admit(admission_shard* shard, admission_slot* slot, uint32_t limit)
 {
+	admission_cache* cache = &g_admission_cache[shard - g_admission_shards];
+
+	if (cache_is_full(cache, slot, limit)) {
+		return false;
+	}
+
 	cf_mutex_lock(&shard->lock);
 
 	uint32_t count = 0;
+	bool tracked = cache_matches(cache, slot);
+	bool publish = ! tracked && atomic_load(&cache->count) == 0;
 
+	// Keep counting past the limit only when publishing. A live limit
+	// decrease can leave more matching reservations than the current limit.
 	for (admission_slot* active = shard->head; active != NULL;
 			active = active->next) {
 		if (active->ns == slot->ns && active->is_write == slot->is_write &&
 				cf_digest_compare(&active->keyd, &slot->keyd) == 0 &&
-				++count == limit) {
+				++count == limit && ! publish) {
 			cf_mutex_unlock(&shard->lock);
 			return false;
 		}
 	}
 
+	if (count >= limit) {
+		cache_publish(cache, slot, count);
+		cf_mutex_unlock(&shard->lock);
+		return false;
+	}
+
 	slot->next = shard->head;
 	shard->head = slot;
+
+	if (tracked) {
+		atomic_store(&cache->count, count + 1);
+	}
+
 	cf_mutex_unlock(&shard->lock);
 	return true;
 }
@@ -128,6 +212,7 @@ try_admit(admission_shard* shard, admission_slot* slot, uint32_t limit)
 static void
 release_admission(admission_shard* shard, const admission_slot* slot)
 {
+	admission_cache* cache = &g_admission_cache[shard - g_admission_shards];
 	cf_mutex_lock(&shard->lock);
 
 	admission_slot** link = &shard->head;
@@ -137,6 +222,12 @@ release_admission(admission_shard* shard, const admission_slot* slot)
 	}
 
 	*link = slot->next;
+
+	if (cache_matches(cache, slot)) {
+		uint32_t count = atomic_load(&cache->count);
+		atomic_store(&cache->count, count - 1);
+	}
+
 	cf_mutex_unlock(&shard->lock);
 }
 

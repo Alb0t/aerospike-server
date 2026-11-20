@@ -1,10 +1,12 @@
 #include <assert.h>
 #include <fcntl.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <unistd.h>
 #include "base/transaction.h"
 #include "base/datamodel.h"
 #include "citrusleaf/alloc.h"
+#include "cf_mutex.h"
 #include "fabric/partition.h"
 #include "transaction/rw_request_hash.h"
 
@@ -18,6 +20,34 @@ extern void __real_as_partition_release(as_partition_reservation*);
 extern void __real_as_transaction_error(as_transaction*, as_namespace*, uint32_t);
 
 static __thread as_partition_reservation* reserved;
+static __thread cf_mutex* first_reserved_lock;
+static __thread bool took_observed_lock;
+static _Atomic(cf_mutex*) observed_lock;
+
+extern void __real_cf_mutex_lock(cf_mutex*);
+static void mark(const char* marker);
+
+void
+__wrap_cf_mutex_lock(cf_mutex* mutex)
+{
+	if (reserved != NULL) {
+		if (first_reserved_lock == NULL) {
+			first_reserved_lock = mutex;
+		}
+		if (mutex == atomic_load(&observed_lock)) {
+			took_observed_lock = true;
+		}
+	}
+	__real_cf_mutex_lock(mutex);
+}
+
+static void
+observe_reservation(as_partition_reservation* rsv)
+{
+	reserved = rsv;
+	first_reserved_lock = NULL;
+	took_observed_lock = false;
+}
 
 int
 __wrap_as_partition_reserve_read_tr(as_namespace* ns, uint32_t pid,
@@ -25,7 +55,7 @@ __wrap_as_partition_reserve_read_tr(as_namespace* ns, uint32_t pid,
 {
 	int rv = __real_as_partition_reserve_read_tr(ns, pid, tr, dest);
 	if (rv == 0) {
-		reserved = &tr->rsv;
+		observe_reservation(&tr->rsv);
 	}
 	return rv;
 }
@@ -36,7 +66,7 @@ __wrap_as_partition_reserve_write(as_namespace* ns, uint32_t pid,
 {
 	int rv = __real_as_partition_reserve_write(ns, pid, rsv, dest);
 	if (rv == 0) {
-		reserved = rsv;
+		observe_reservation(rsv);
 	}
 	return rv;
 }
@@ -55,6 +85,9 @@ __wrap_as_transaction_error(as_transaction* tr, as_namespace* ns, uint32_t code)
 {
 	if (code == AS_ERR_KEY_BUSY) {
 		assert(reserved == NULL);
+		if (access("observe-admission-lock", F_OK) == 0) {
+			mark(took_observed_lock ? "locked-rejections" : "cached-rejections");
+		}
 	}
 	__real_as_transaction_error(tr, ns, code);
 }
@@ -115,6 +148,11 @@ transaction_status
 __wrap_as_read_start(as_transaction* tr)
 {
 	if (test_key(tr)) {
+		if (access("observe-admission-lock", F_OK) == 0) {
+			// The admission lock is the first mutex taken after reservation.
+			assert(first_reserved_lock != NULL);
+			atomic_store(&observed_lock, first_reserved_lock);
+		}
 		hold("hold-read", "entered-read");
 	}
 	else if (tr->origin == FROM_CLIENT && strcmp(tr->rsv.ns->name, "test") == 0 &&

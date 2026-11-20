@@ -142,8 +142,9 @@ cache_is_full(const admission_cache* cache, const admission_slot* slot,
 	// All snapshot fields use sequentially consistent atomics. An unchanged
 	// even version covers the identity and count in the same publication.
 	// A racing release may free a slot after this count has been read.
-	return !(version & 1) && atomic_load(&cache->count) >= limit &&
-			cache_matches(cache, slot) && atomic_load(&cache->version) == version;
+	return ! (version & 1) && atomic_load(&cache->count) >= limit &&
+			cache_matches(cache, slot) &&
+			atomic_load(&cache->version) == version;
 }
 
 // The caller holds the shard mutex and has counted every matching slot.

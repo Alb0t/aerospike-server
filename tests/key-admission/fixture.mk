@@ -6,7 +6,7 @@ FIXTURE_OBJECT = $(OBJECT_DIR)/admission_fixture.o
 FIXTURE = $(BIN_DIR)/asd-admission-fixture
 WRAPPED = as_read_start as_write_start as_partition_reserve_read_tr \
 	as_partition_reserve_write as_partition_release as_transaction_error \
-	rw_request_hash_insert
+	rw_request_hash_insert cf_mutex_lock
 
 $(FIXTURE_OBJECT): $(TEST_DIR)/fixture.c
 	$(CC) $(CFLAGS) $(DEF_FN) -o $@ -c $(INCLUDES) $<

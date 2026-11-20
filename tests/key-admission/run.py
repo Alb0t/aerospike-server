@@ -332,6 +332,47 @@ def test_live_limit():
     print("Live lowering, disable while occupied and lane drain passed", flush=True)
 
 
+def test_cache_reuse():
+    # Both digests hash to the same admission shard.
+    other = DIGEST[:-1] + bytes([255])
+    assert send("write", digest=other) == 0
+    assert setcap("read", 1) == "ok"
+
+    def check_rejections(locked, cached):
+        for name, expected in (("locked-rejections", locked), ("cached-rejections", cached)):
+            path = Path(name)
+            assert (path.stat().st_size if path.exists() else 0) == expected, name
+
+    Path("entered-read").unlink(missing_ok=True)
+    with hold("observe-admission-lock"), ThreadPoolExecutor(2) as pool:
+        with hold("hold-colliding-read"):
+            with hold("hold-read"):
+                first = pool.submit(send, "read")
+                until(Path("entered-read").exists)
+                assert send("read") == 14
+                check_rejections(1, 0)
+                assert send("read") == 14
+                check_rejections(1, 1)
+                second = pool.submit(send, "read", digest=other)
+                until(Path("entered-colliding-read").exists)
+                assert count("read") == 2
+                assert send("read", digest=other) == 14
+                check_rejections(2, 1)
+
+            assert first.result(timeout=5) == 0
+            until(lambda: count("read") == 1)
+            assert send("read", digest=other) == 14
+            check_rejections(3, 1)
+            assert send("read", digest=other) == 14
+            check_rejections(3, 2)
+            assert send("read") == 0
+
+        assert second.result(timeout=5) == 0
+        until(lambda: count("read") == 0)
+    assert send("read", digest=other) == 0
+    print("Same-shard keys retain independent limits across cache reuse", flush=True)
+
+
 def exercise_config():
     keys = [f"{PREFIX}{op}-key-concurrency-limit" for op in ("read", "write")]
     assert [config()[k] for k in keys] == ["0", "0"]
@@ -447,6 +488,7 @@ def run():
             assert "read key admission limit reached" in log.read_text()
             assert send("write", namespace="second") == 0
             test_live_limit()
+            test_cache_reuse()
             test_requeue()
         test_startup(log)
     except BaseException:
